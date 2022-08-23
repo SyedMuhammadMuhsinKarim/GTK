@@ -1,5 +1,4 @@
 # coding: utf-8
-from genericpath import exists
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -9,7 +8,6 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torch.autograd import Variable
 from layers import MLP, EraseAddGate, MLPEncoder, MLPDecoder, ScaledDotProductAttention
 from utils import gumbel_softmax
-import math
 
 # Graph-based Knowledge Tracing: Modeling Student Proficiency Using Graph Neural Network.
 # For more information, please refer to https://dl.acm.org/doi/10.1145/3350546.3352513
@@ -31,17 +29,19 @@ class PositionalEmbedding(nn.Module):
         super(PositionalEmbedding, self).__init__()
         self.d_model = d_model
         self.max_len = max_len
-        self.positional_encoding = self.init_positional_encoding()
 
-    def init_positional_encoding(self):
+    def init_positional_encoding(self, x):
         positional_encoding = np.array([[pos / np.power(10000, 2 * (j // 2) / self.d_model) for j in range(self.d_model)] for pos in range(self.max_len)])
         positional_encoding[:, 0::2] = np.sin(positional_encoding[:, 0::2])
         positional_encoding[:, 1::2] = np.cos(positional_encoding[:, 1::2])
         positional_encoding = positional_encoding[np.newaxis, ...]
         positional_encoding = torch.from_numpy(positional_encoding).type(torch.FloatTensor)
+        
+        # positional_encoding = positional_encoding[:, :x.size(1), :]
+        positional_encoding = positional_encoding.permute(0, 1, 2)[0, :, :]
         return positional_encoding
 
-    def forward(self, x):
+    def forward(self, x, y = None):
         """
         Description: 
             Forward propagation.
@@ -49,7 +49,10 @@ class PositionalEmbedding(nn.Module):
         Args:
             x: the input sequence.
         """
-        return x + self.positional_encoding[:, :x.size(1), :]
+        
+        self.d_model = y if y != None else self.d_model
+        pe = self.init_positional_encoding(x)
+        return x + pe
 
 class GKT(nn.Module):
     """
@@ -170,8 +173,11 @@ class GKT(nn.Module):
         qt_mask = torch.ne(qt, -1)  # [batch_size], qt != -1
         x_idx_mat = torch.arange(self.res_len * self.concept_num, device=xt.device)
         x_embedding = self.emb_x(x_idx_mat)  # [res_len * concept_num, embedding_dim]
-        
-        x_embedding = self.pos_emb.forward(x_embedding)
+        try:
+            x_embedding = self.pos_emb.forward(x_embedding)
+        except Exception as e:
+            print(e)
+            exit()
         
         masked_feat = F.embedding(xt[qt_mask], self.one_hot_feat)  # [mask_num, res_len * concept_num]
         res_embedding = masked_feat.mm(x_embedding)  # [mask_num, embedding_dim]
@@ -180,7 +186,7 @@ class GKT(nn.Module):
         concept_idx_mat = self.concept_num * torch.ones((batch_size, self.concept_num), device=xt.device).long()
         concept_idx_mat[qt_mask, :] = torch.arange(self.concept_num, device=xt.device)
         concept_embedding = self.emb_c(concept_idx_mat)  # [batch_size, concept_num, embedding_dim] 
-        concept_embedding = self.pos_emb.forward(concept_embedding)
+        concept_embedding = PositionalEmbedding(concept_embedding.shape[2], concept_embedding.shape[1]).forward(concept_embedding)
         
         index_tuple = (torch.arange(mask_num, device=xt.device), qt[qt_mask].long())
         concept_embedding[qt_mask] = concept_embedding[qt_mask].index_put(index_tuple, res_embedding)
